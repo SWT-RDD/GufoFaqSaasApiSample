@@ -100,14 +100,18 @@ def print_results(data: dict) -> None:
     print(f"新增 {data['inserted']} 筆、取代 {data['updated']} 筆、失敗 {data['failed']} 筆")
     for i, r in enumerate(data["results"]):
         name = r.get("filename", f"第 {i + 1} 筆")
+        # external_key：這一筆的外部主鍵（沒帶是 None），失敗的那一筆也有
+        key_part = f"  外部主鍵={r['external_key']}" if r.get("external_key") else ""
         if r["ok"]:
             # doc（結構化資料）或 file_id（檔案）就是之後刪除要用的編號，建議存起來
             item_id = r.get("doc", r.get("file_id"))
             state = r.get("sync_state", {}).get("state")
-            print(f"  {name}：成功  編號={item_id}  處理狀態={state}")
+            # replace_mode：incremental＝只重算有變動的列；rebuild＝整份重建；None＝新增
+            mode_part = f"  取代方式={r['replace_mode']}" if r.get("replace_mode") else ""
+            print(f"  {name}：成功  編號={item_id}  處理狀態={state}{key_part}{mode_part}")
         else:
             code_part = f"Code={r['code']}  " if r.get("code") else ""
-            print(f"  {name}：失敗  {code_part}{r.get('error')}")
+            print(f"  {name}：失敗  {code_part}{r.get('error')}{key_part}")
 
 
 def upload_records(dataset_id: int, records: list[dict], convert_html: bool = True) -> None:
@@ -130,17 +134,22 @@ def upload_files(
     mapping: dict | None = None,
     external_keys: dict | None = None,
     header_rows: int = 1,
+    row_key: str | None = None,
 ) -> None:
     """上傳 pdf／docx／xlsx 檔案。
 
     mapping（只對 xlsx 有效）：{"content": ["答案"], "title": ["問題"]}，帶了就是每一列一筆。
     external_keys：{"檔名": "外部主鍵"}，帶了就會取代同主鍵的舊檔案。
+    row_key（只對有帶 mapping 的 xlsx 有效）：哪一個欄位當每一列的身分，例如 "note3"。
+        與 external_keys 一起用時，同一份檔每天整份上傳只會重算有變動的列。
     """
     form = {"header_rows": str(header_rows)}
     if mapping:
         form["mapping"] = json.dumps(mapping, ensure_ascii=False)
     if external_keys:
         form["external_keys"] = json.dumps(external_keys, ensure_ascii=False)
+    if row_key:
+        form["row_key"] = row_key
 
     with ExitStack() as stack:
         files = [("files", (Path(p).name, stack.enter_context(open(p, "rb")))) for p in paths]
@@ -238,6 +247,14 @@ if __name__ == "__main__":
     # upload_files(dataset_id, ["手冊.pdf", "說明.docx"], external_keys={"手冊.pdf": "manual-v1"})
     # Excel 每一列一筆：用 mapping 指定哪幾欄放進哪個欄位
     # upload_files(dataset_id, ["常見問題.xlsx"], mapping={"title": ["問題"], "content": ["答案"]})
+    # 每天整份上傳同一份 Excel、只重算有變動的列：用一欄當每一列的身分（例如你那一側的資料庫編號）
+    # upload_files(
+    #     dataset_id,
+    #     ["常見問題_1109.xlsx"],
+    #     mapping={"title": ["問題"], "content": ["答案"], "note3": ["原始鍵"]},
+    #     row_key="note3",
+    #     external_keys={"常見問題_1109.xlsx": "faq-daily"},  # 每天同一把外部主鍵
+    # )
     # ----------------------------------------------------------
 
     # 主程式（資料上傳 - 列出與刪除）
