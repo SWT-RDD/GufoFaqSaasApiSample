@@ -11,7 +11,7 @@
   - [1-4. 資料集改名](#1-4-資料集改名)：`PATCH /api/v1/datasets/{dataset_id}`
   - [1-5. 刪除資料集](#1-5-刪除資料集)：`DELETE /api/v1/datasets/{dataset_id}`
   - [1-6. 上傳結構化資料](#1-6-上傳結構化資料)：`POST /api/v1/datasets/{dataset_id}/records`
-  - [1-7. 上傳檔案](#1-7-上傳檔案)：`POST /api/v1/datasets/{dataset_id}/files`
+  - [1-7. 上傳檔案](#1-7-上傳檔案)：`POST /api/v1/datasets/{dataset_id}/files`（含 [每天整份上傳、只重算有變動的列](#row_key-說明每天整份上傳只重算有變動的列)）
   - [1-8. 列出資料](#1-8-列出資料)：`GET /api/v1/datasets/{dataset_id}/records`
   - [1-9. 刪除一筆資料](#1-9-刪除一筆資料)：`DELETE /api/v1/datasets/{dataset_id}/records/{file_id}`
   - [資料處理狀態](#資料處理狀態)、[資料上傳錯誤列表](#資料上傳錯誤列表)、[注意事項](#注意事項)
@@ -338,8 +338,8 @@ curl -X POST "https://<your-host>/api/v1/datasets/12/records" \
 | | "updated": 0, |
 | | "failed": 1, |
 | | "results": [ |
-| | {"ok": true, "doc": 101, "updated": false, "replaced_file_id": null, "task_id": "8c1f...", "sync_state": {"state": "pending", "indexed_count": null, "failed_count": null, "reason": null}}, |
-| | {"ok": false, "error": "content 欄位不可為空", "code": "content_required"} |
+| | {"ok": true, "doc": 101, "updated": false, "replaced_file_id": null, "external_key": "faq-001", "replace_mode": null, "task_id": "8c1f...", "sync_state": {"state": "pending", "indexed_count": null, "failed_count": null, "reason": null}}, |
+| | {"ok": false, "error": "content 欄位不可為空", "code": "content_required", "external_key": null} |
 | | ], |
 | | "health_scan": {"ok": true, "detail": null, "scan": {...}} |
 | | } |
@@ -361,6 +361,8 @@ curl -X POST "https://<your-host>/api/v1/datasets/12/records" \
 | doc | 這一筆在系統裡的編號，之後要刪除時用，**建議存起來** |
 | updated | 這一筆是否取代了舊資料 |
 | replaced_file_id | 被取代的舊資料編號，沒有則是 `null` |
+| external_key | 這一筆的 `external_key`（去掉前後空白），沒帶是 `null`。**失敗的那一筆也有**，用來對回你那一側的資料 |
+| replace_mode | 取代的方式：`rebuild`＝刪掉舊版、整份重建；`incremental`＝只重算有變動的列（只有 [1-7 帶 `row_key`](#row_key-說明每天整份上傳只重算有變動的列) 的 xlsx 會有）；新增時是 `null` |
 | task_id | 系統內部的處理編號 |
 | sync_state | 處理狀態，見 [資料處理狀態](#資料處理狀態) |
 | error | 失敗原因（失敗時才有） |
@@ -388,6 +390,7 @@ Post https://&lt;your-host&gt;/api/v1/datasets/{dataset_id}/files
 | files | 要上傳的檔案，可以重複帶多個。支援 `.pdf`、`.docx`、`.xlsx`；一次最多 200 個，單檔最大 50 MB，全部合計最大 200 MB |
 | mapping | （選填，只對 xlsx 有效）json 字串，指定哪幾欄要放進哪個欄位，例如 `{"content": ["答案"], "title": ["問題"]}`。欄位名稱同 [1-6 Layer 3](#layer-3records-每一筆)，值是 xlsx 的欄名陣列，`content` 必填 |
 | external_keys | （選填）json 字串，每個檔案的 `external_key`，例如 `{"手冊.pdf": "manual-v1"}`，鍵是檔名 |
+| row_key | （選填，只對有帶 `mapping` 的 xlsx 有效）哪一個欄位當每一列的身分，例如 `note3`。見 [row_key 說明](#row_key-說明每天整份上傳只重算有變動的列) |
 | convert_html | （選填）是否把 HTML 轉成 Markdown，預設 `true` |
 | header_rows | （選填）xlsx 的表頭佔幾列，1～10，預設 1。大於 1 時 `mapping` 的欄名要用全形斜線串起來，例如 `"常見問題／問題"` |
 | unpivot | （選填）xlsx 是交叉表時填 `true`，會攤平成一列一筆。這時 `mapping` 的欄名只能用 `"列標題"`、`"欄標題"`、`"值"` |
@@ -399,6 +402,27 @@ Post https://&lt;your-host&gt;/api/v1/datasets/{dataset_id}/files
 | pdf、docx | 抽出全文放進 `content`，整份成為一份文件 |
 | xlsx，有帶 `mapping` | 只讀第一張工作表，**每一列成為一份文件**（與後台的 Excel 匯入相同） |
 | xlsx，沒帶 `mapping` | 整份成為一份文件，不分欄位；這種檔案不能帶 `external_key` |
+
+##### row_key 說明（每天整份上傳、只重算有變動的列）
+同一份 Excel 每天整份上傳時，帶 `row_key` 加 `external_keys`，系統只會重算新增、修改、刪除的那幾列，其他列不動；上傳期間舊資料照常查得到。
+
+- `row_key` 填一個欄位名稱，這一欄的值就是每一列的身分，**通常放你那一側資料庫的編號**。可以用的欄位：`title`、`source`、`note1`～`note10`。
+- 這一欄要在 `mapping` 裡指定來自哪一欄，例如 `mapping={"title":["問題"],"content":["答案"],"note3":["原始鍵"]}`、`row_key=note3`。
+- 每一列都要有值、不可重複；有任何一列不符合，整個檔案不會匯入（`row_key_invalid`，訊息會列出是哪幾列）。前後空白不算，數字 `12345` 與文字 `12345` 視為同一個值。
+- 同一筆資料每天都要用同一個值；刪掉的值不要再給另一筆資料用。
+- 同一把 `external_key` 再上傳時，回應的 `replace_mode` 會是 `incremental`，`file_id` 不變。
+- 下列情況會改成**整份重建一次**（`replace_mode` 是 `rebuild`，`file_id` 會換新）：第一次加上 `row_key`、換了 `row_key`、`mapping` 改變（包括某個日期、分類、數值、標記欄整欄都沒填）。之後再傳就會回到 `incremental`。
+- 上傳日期（[1-8](#1-8-列出資料) 的 `uploaded_at`）保留第一次上傳那天，不會每天更新。
+
+```bash
+curl -X POST "https://<your-host>/api/v1/datasets/12/files" \
+  -H "X-API-Key: your_api_key" \
+  -F "files=@常見問題.xlsx" \
+  -F 'mapping={"title":["問題"],"content":["答案"],"note3":["原始鍵"]}' \
+  -F "row_key=note3" \
+  -F 'external_keys={"常見問題.xlsx":"faq-daily"}'
+```
+每天上傳的檔名不同時，`external_keys` 的鍵要換成當天的檔名，值維持同一把（例如 `{"常見問題_1109.xlsx":"faq-daily"}`）。
 
 #### curl 請求範例
 上傳兩份文件：
@@ -424,16 +448,18 @@ curl -X POST "https://<your-host>/api/v1/datasets/12/files" \
 
 ```json
 {
-  "inserted": 2,
-  "updated": 0,
+  "inserted": 1,
+  "updated": 1,
   "failed": 1,
   "results": [
     {"filename": "手冊.pdf", "ok": true, "file_id": 11, "updated": false, "replaced_file_id": null,
+     "external_key": "manual-v1", "replace_mode": null,
      "task_id": "…", "sync_state": {"state": "pending", "indexed_count": null, "failed_count": null, "reason": null},
      "structure": {"pages": 12, "tables": 1, "table_rows": 8, "continuation_tables": 0, "suspected_table_pages": 0}},
-    {"filename": "常見問題.xlsx", "ok": true, "file_id": 12, "connector": "excel", "data_count": 250, "updated": false,
-     "replaced_file_id": null, "task_id": "…", "sync_state": {"state": "pending", "indexed_count": null, "failed_count": null, "reason": null}},
-    {"filename": "忽略.txt", "ok": false, "error": "僅支援 .pdf / .docx / .xlsx"}
+    {"filename": "常見問題.xlsx", "ok": true, "file_id": 12, "connector": "excel", "data_count": 250, "updated": true,
+     "replaced_file_id": 12, "external_key": "faq-daily", "replace_mode": "incremental",
+     "task_id": "…", "sync_state": {"state": "pending", "indexed_count": null, "failed_count": null, "reason": null}},
+    {"filename": "忽略.txt", "ok": false, "error": "僅支援 .pdf / .docx / .xlsx", "external_key": null}
   ],
   "health_scan": {"ok": true, "detail": null, "scan": {}}
 }
@@ -547,6 +573,9 @@ curl -X DELETE "https://<your-host>/api/v1/datasets/12/records/101" -H "X-API-Ke
 | 400 | bad_external_key | external_key 不可為空字串… | `external_key` 是空字串，不需要時請整個不要帶 |
 | 400 | bad_external_keys | external_keys 必須是合法 JSON… | 上傳檔案時 `external_keys` 格式錯誤 |
 | 400 | bad_mapping | mapping 必須是合法 JSON… | 上傳檔案時 `mapping` 格式錯誤 |
+| 400 | bad_row_key | row_key「content」不能當列身分欄；可以用的欄位槽：… | `row_key` 不是 `title`、`source`、`note1`～`note10` 其中之一 |
+| 400 | row_key_not_mapped | row_key「note5」在 mapping 裡沒有對應到任何來源欄… | `mapping` 沒有指定 `row_key` 那一欄來自哪一欄 |
+| 400 | row_key_requires_mapping | row_key 只對帶 mapping 的 xlsx 有效… | 帶了 `row_key` 卻沒帶 `mapping` |
 | 400 | too_many_import_files | 這次上傳的檔案有 201 筆，超過上限 200… | 一次超過 200 個檔案 |
 | 404 | | 找不到這個資料集 | `dataset_id` 錯誤 |
 | 409 | use_qa_import | 這是 QA 集，請用 QA 匯入… | 目標是 QA 集，不能用這組 API 上傳 |
@@ -567,6 +596,9 @@ curl -X DELETE "https://<your-host>/api/v1/datasets/12/records/101" -H "X-API-Ke
 | unknown_column | | xlsx 找不到 `mapping` 指定的欄名 |
 | content_cell_required | | xlsx 有幾列的 `content` 是空的，`rows` 會列出是哪幾列 |
 | external_key_unsupported | | 沒帶 mapping 的 xlsx 不能帶 `external_key` |
+| row_key_invalid | 列身分欄「note3」每一列都要有值且不可重複：第 2 筆資料列（不含空白列）是空的；「K1」重複出現在… | `row_key` 那一欄有空白或重複的值，訊息會列出是哪幾列 |
+| row_key_slot_in_use | 欄位槽「note3」已被這個租戶的標籤維度或時效設定使用… | 這個欄位在後台設成標籤或時效欄位了，請改用其他欄位當 `row_key` |
+| import_busy | 這個檔案正在被資料健檢或另一筆上傳處理，請稍後再傳一次 | 稍等幾秒再傳一次 |
 | （無） | 僅支援 .pdf / .docx / .xlsx | 不支援的檔案類型 |
 | （無） | 無法解析 PDF 檔案：…／這個 PDF 有密碼保護… | 檔案損毀或加密 |
 | （無） | 處理失敗。請提供關聯編號 … 給維運人員查詢詳情。 | 其他錯誤，請提供關聯編號給我們 |
