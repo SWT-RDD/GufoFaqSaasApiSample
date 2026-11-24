@@ -1,4 +1,4 @@
-"""GufoFAQ API 範例程式：以 API 金鑰呼叫資料上傳 API 與文字萃取 API。
+"""GufoFAQ API 範例程式：以 API 金鑰呼叫資料上傳 API（含 QA 集）與文字萃取 API。
 
 使用方式比照舊版範例：在最下面「主程式」區塊解除想執行那一段的註解，再執行
     pip install -r requirements.txt
@@ -83,7 +83,8 @@ def list_datasets() -> None:
         print_error(resp)
         return
     for ds in resp.json():
-        print(f"id={ds['id']}  name={ds['name']}  file_count={ds['file_count']}")
+        # kind：file＝一般資料集（用 upload_records／upload_files）；qa＝QA 集（用 import_qa）
+        print(f"id={ds['id']}  name={ds['name']}  kind={ds.get('kind')}  file_count={ds['file_count']}")
 
 
 def delete_dataset(dataset_id: int) -> None:
@@ -164,6 +165,81 @@ def upload_files(
         print_error(resp)
         return
     print_results(resp.json())
+
+
+def import_qa(
+    dataset_id: int,
+    path: str,
+    question_col: str,
+    answer_col: str,
+    id_col: str | None = None,
+    row_key: str | None = None,
+    external_key: str | None = None,
+    allow_mass_removal: bool = False,
+    sheet_name: str | None = None,
+    header_rows: int = 1,
+    convert_html: bool = True,
+) -> None:
+    """上傳一份 QA 集的 Excel（一次一個 .xlsx）：問題欄＋答案欄，每一列一題。
+
+    每天整份上傳、只重算有變動的題：同時帶 id_col（你那一側的題目編號欄）、row_key（編號存放的欄位，
+    例如 "note3"）、external_key（這份檔固定的名字，每天都用同一個）。
+    allow_mass_removal：這次要刪掉的題數超過上一版的 20% 時會被擋下（409 qa_mass_removal），
+        確認不是匯出漏資料、真的要刪那麼多時，才帶 True 重送。
+    """
+    form = {
+        "question_col": question_col,
+        "answer_col": answer_col,
+        "header_rows": str(header_rows),
+        "convert_html": "true" if convert_html else "false",
+    }
+    if id_col:
+        form["id_col"] = id_col
+    if row_key:
+        form["row_key"] = row_key
+    if external_key:
+        form["external_key"] = external_key
+    if sheet_name:
+        form["sheet_name"] = sheet_name
+    if allow_mass_removal:
+        form["allow_mass_removal"] = "true"
+
+    with open(path, "rb") as fh:
+        resp = session.post(
+            f"{BASE_URL}/api/v1/datasets/{dataset_id}/qa/import",
+            data=form,
+            files={"file": (Path(path).name, fh)},
+            headers=api_key_headers(),
+            timeout=TIMEOUT,
+        )
+    if not resp.ok:
+        print_error(resp)
+        # 問題或答案留白時，detail 會帶 rows（是哪幾列，含表頭列數）
+        try:
+            rows = resp.json().get("detail", {}).get("rows")
+        except (ValueError, AttributeError):
+            rows = None
+        if rows:
+            print(f"  有問題的列：{rows}")
+        return
+
+    data = resp.json()
+    state = data.get("sync_state", {}).get("state")
+    # replace_mode：incremental＝只重算有變動的題；rebuild＝整份重建；None＝第一次上傳（新增）
+    print(f"成功  檔案編號={data['file_id']}  題數={data['data_count']}  "
+          f"取代方式={data.get('replace_mode')}  處理狀態={state}")
+    changes = data.get("row_changes")
+    if changes is None:
+        # 第一次上傳、上一版沒有帶編號，或換了編號欄位時算不出差異
+        print("  這次沒有可比對的上一版，不列出差異")
+    else:
+        print(f"  新增 {changes['added']} 題、刪除 {changes['removed']} 題、"
+              f"修改 {changes['modified']} 題、未變 {changes['unchanged']} 題")
+        for label, key in (("新增", "added_ids"), ("刪除", "removed_ids"), ("修改", "modified_ids")):
+            if changes[key]:
+                print(f"  {label}的編號：{', '.join(changes[key])}")
+        if changes.get("truncated"):
+            print("  （編號清單每類最多列 500 個，超過的沒有列出）")
 
 
 def list_records(dataset_id: int) -> None:
@@ -255,6 +331,24 @@ if __name__ == "__main__":
     #     row_key="note3",
     #     external_keys={"常見問題_1109.xlsx": "faq-daily"},  # 每天同一把外部主鍵
     # )
+    # ----------------------------------------------------------
+
+    # 主程式（資料上傳 - 上傳 QA 集）
+    # ----------------------------------------------------------
+    # dataset_id = 1234  # 換成 QA 集的編號（list_datasets() 裡 kind=qa 的那一個）
+    # 每天把資料庫裡的 QA 整份匯出成 Excel（三欄：編號、問題、答案），用同一組參數上傳
+    # import_qa(
+    #     dataset_id,
+    #     "QA集_1124.xlsx",
+    #     question_col="問題",
+    #     answer_col="答案",
+    #     id_col="編號",
+    #     row_key="note3",
+    #     external_key="QA集主檔",  # 每天同一個
+    # )
+    # 被擋下（qa_mass_removal）且確認真的要刪那麼多題時：
+    # import_qa(dataset_id, "QA集_1124.xlsx", question_col="問題", answer_col="答案",
+    #           id_col="編號", row_key="note3", external_key="QA集主檔", allow_mass_removal=True)
     # ----------------------------------------------------------
 
     # 主程式（資料上傳 - 列出與刪除）

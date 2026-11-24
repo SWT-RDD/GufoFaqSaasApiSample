@@ -14,6 +14,7 @@
   - [1-7. 上傳檔案](#1-7-上傳檔案)：`POST /api/v1/datasets/{dataset_id}/files`（含 [每天整份上傳、只重算有變動的列](#row_key-說明每天整份上傳只重算有變動的列)）
   - [1-8. 列出資料](#1-8-列出資料)：`GET /api/v1/datasets/{dataset_id}/records`
   - [1-9. 刪除一筆資料](#1-9-刪除一筆資料)：`DELETE /api/v1/datasets/{dataset_id}/records/{file_id}`
+  - [1-10. 上傳 QA 集](#1-10-上傳-qa-集)：`POST /api/v1/datasets/{dataset_id}/qa/import`（每天整份上傳、只重算有變動的題）
   - [資料處理狀態](#資料處理狀態)、[資料上傳錯誤列表](#資料上傳錯誤列表)、[注意事項](#注意事項)
 - [2. 文字萃取 API（國家／時間）](#2-文字萃取-api國家時間)：`POST /api/extract/country-or-time`
   - [Mode 說明](#mode-說明)、[注意事項](#注意事項-1)
@@ -24,7 +25,7 @@
 
 | API | 用途 |
 | --- | --- |
-| [資料上傳 API](#1-資料上傳-api) | 建立資料集、上傳結構化資料或檔案、列出與刪除資料 |
+| [資料上傳 API](#1-資料上傳-api) | 建立資料集、上傳結構化資料或檔案、上傳 QA 集、列出與刪除資料 |
 | [文字萃取 API](#2-文字萃取-api國家時間) | 從一段文字萃取國家及／或時間 |
 
 範例程式在 `sample.py`（Python），執行前先 `pip install -r requirements.txt`，再把檔案開頭的網址與 API 金鑰換成你自己的。
@@ -182,7 +183,8 @@ curl "https://<your-host>/api/v1/datasets" -H "X-API-Key: your_api_key"
 #### 回應資料範例
 ```json
 [
-  {"id": 12, "name": "產品手冊", "index_name": "t3_1a2b3c4d", "group_id": null, "file_count": 3}
+  {"id": 12, "name": "產品手冊", "index_name": "t3_1a2b3c4d", "group_id": null, "file_count": 3, "kind": "file"},
+  {"id": 5, "name": "QA集", "index_name": "t3_5e6f7a8b", "group_id": 2, "file_count": 1, "kind": "qa"}
 ]
 ```
 
@@ -193,8 +195,9 @@ curl "https://<your-host>/api/v1/datasets" -H "X-API-Key: your_api_key"
 | index_name | 系統內部的索引名稱 |
 | group_id | 所屬群組；用 API 建立的資料集是 `null` |
 | file_count | 資料集裡有幾份資料或檔案 |
+| kind | `file`＝一般資料集；`qa`＝QA 集 |
 
-> 清單包含帳號裡所有資料集，也包含後台建立的 QA 集。QA 集不能用這組 API 上傳資料（會回 409 `use_qa_import`）。
+> 清單包含帳號裡所有資料集，也包含後台建立的 QA 集。QA 集（`kind` 是 `qa`）要用 [1-10. 上傳 QA 集](#1-10-上傳-qa-集)；用 1-6、1-7 上傳會回 409 `use_qa_import`。
 
 ---
 
@@ -545,6 +548,144 @@ curl -X DELETE "https://<your-host>/api/v1/datasets/12/records/101" -H "X-API-Ke
 
 ---
 
+### 1-10. 上傳 QA 集
+上傳一份 QA 集的 Excel：一列一題，問題放一欄、答案放一欄。QA 集的題目會被「QA 直答」逐字比對問題、逐字回覆答案。
+
+QA 集要先在後台建立（API 不能建立 QA 集），用[列出資料集](#1-2-列出資料集)找到 `kind` 是 `qa` 的那一個編號。
+
+#### URL
+Post https://&lt;your-host&gt;/api/v1/datasets/{dataset_id}/qa/import
+
+#### 請求格式
+| KEY | VALUE |
+| --- | --- |
+| Content-Type | multipart/form-data |
+| X-API-Key | 你的 API 金鑰 |
+
+#### 請求資料範例
+| KEY | VALUE |
+| --- | --- |
+| file | 要上傳的檔案，**一次一個**，只收 `.xlsx`，最大 50 MB、20 萬列 |
+| question_col | 問題那一欄的欄名，必填 |
+| answer_col | 答案那一欄的欄名，必填 |
+| id_col | （選填）題目編號那一欄的欄名，通常是你那一側資料庫的編號。要每天只重算有變動的題時必填 |
+| row_key | （選填）編號存放在哪個欄位：`source`、`note1`～`note10`（**不能用 `title`**，那是問題）。要與 `id_col` 一起帶 |
+| external_key | （選填）這份檔固定的名字，例如 `QA集主檔`。帶了就取代同名的舊檔，不帶就每次新增一份。**有帶 `id_col` 時必填** |
+| sheet_name | （選填）工作表名稱，預設第一張 |
+| header_rows | （選填）表頭佔幾列，1～10，預設 1 |
+| convert_html | （選填）是否把答案裡的 HTML 轉成 Markdown，預設 `true` |
+| allow_mass_removal | （選填）預設 `false`。這次要刪掉的題數超過上一版 20% 時會被擋下，確認真的要刪時才帶 `true` 重送 |
+
+##### 每天整份上傳
+每天把資料庫裡的 QA **整份**匯出成一份 Excel（三欄：編號、問題、答案），用**同一組** `id_col`、`row_key`、`external_key` 上傳。系統用編號比對上一版：
+
+- 這次有、上一版沒有的編號 ⇒ 新增
+- 上一版有、這次沒有的編號 ⇒ **刪除**
+- 同一個編號、問題或答案不同 ⇒ 修改
+- 只重算這三種題目，其他題目不動，上傳期間舊題目照常查得到
+
+規則：
+
+- 每一列的問題、答案、編號都要有值，編號不可重複；有任何一列不符合，**整個檔案不會匯入**，訊息會列出是哪幾列。前後空白不算，數字 `12345` 與文字 `12345` 視為同一個編號。
+- 同一題每天都要用同一個編號；刪掉的編號不要再給另一題用。
+- 檔名每天不同沒關係，認的是 `external_key`。
+- 全新的第一次上傳是新增（`replace_mode` 是 `null`）。原本沒帶編號、第一次改成帶編號，或換了 `row_key`、問題欄、答案欄的那一次，會**整份重建一次**（`replace_mode` 是 `rebuild`），重建的幾分鐘內 QA 直答查不到這個 QA 集，請挑離峰時段。之後再傳就是 `incremental`。
+- **如果 `replace_mode` 每天都是 `rebuild` 或 `null`，代表沒有走到增量**，請檢查是不是漏帶 `id_col`／`row_key`／`external_key`，或每天帶的值不一樣。
+
+##### 大量刪除防呆
+這次上傳要刪掉的題數超過上一版的 **20%** 時，整批不處理，回 409 `qa_mass_removal`，資料完全不動。這是為了防止匯出時漏撈一大段資料、上傳後那些題目就從直答消失。
+
+確認不是漏資料、真的要刪那麼多題時，同一份檔加 `allow_mass_removal=true` 重送。剛好 20%（例如 5 題刪 1 題）不會被擋。
+
+##### 由 API 管理的 QA 集
+QA 集裡只要有一份帶編號上傳的檔，後台的「匯入問答」就會被擋下（避免同一題出現兩份）。之後請一律從資料庫修改、用 API 上傳；在後台直接改題目內容，隔天整份上傳時會被蓋掉。
+
+#### curl 請求範例
+每天整份上傳：
+```bash
+curl -X POST "https://<your-host>/api/v1/datasets/5/qa/import" \
+  -H "X-API-Key: your_api_key" \
+  -F "file=@QA集_1124.xlsx" \
+  -F "question_col=問題" \
+  -F "answer_col=答案" \
+  -F "id_col=編號" \
+  -F "row_key=note3" \
+  -F "external_key=QA集主檔"
+```
+
+確認要刪除超過 20% 的題目時，再加一行：
+```bash
+  -F "allow_mass_removal=true"
+```
+記得換掉 your_api_key 與資料集編號
+
+#### 回應資料範例
+成功時 HTTP 200，**整份檔成功或整份失敗**（與 1-7 逐檔回報不同）：
+
+```json
+{
+  "dataset_id": 5,
+  "file_id": 68,
+  "inserted": 0,
+  "updated": 1,
+  "failed": 0,
+  "data_count": 7,
+  "external_key": "QA集主檔",
+  "replace_mode": "incremental",
+  "replaced_file_id": 68,
+  "task_id": "…",
+  "sync_state": {"state": "pending", "indexed_count": null, "failed_count": null, "reason": null},
+  "label_sync_warning": null,
+  "row_changes": {
+    "added": 1, "removed": 1, "modified": 1, "unchanged": 4,
+    "added_ids": ["K7"], "removed_ids": ["K6"], "modified_ids": ["K1"],
+    "truncated": false
+  },
+  "health_scan": {"ok": true, "detail": null, "scan": {}}
+}
+```
+
+| KEY | VALUE |
+| --- | --- |
+| file_id | 這份檔在系統裡的編號。增量更新時不變 |
+| inserted／updated | 這份檔是新增（`inserted` 1）還是取代舊檔（`updated` 1） |
+| data_count | 這次送出的題數 |
+| replace_mode | `incremental`＝只重算有變動的題；`rebuild`＝整份重建；`null`＝第一次上傳 |
+| replaced_file_id | 被取代的舊檔編號；增量時與 `file_id` 相同 |
+| sync_state | 背景建立索引的狀態，見[資料處理狀態](#資料處理狀態) |
+| row_changes | 這次與上一版相比：新增、刪除、修改、未變各幾題，以及新增、刪除、修改的編號清單（每類最多 500 個，超過時 `truncated` 是 `true`）。第一次上傳、上一版沒有帶編號、或換了 `row_key` 時是 `null` |
+| health_scan | 上傳後自動做的資料健檢結果 |
+| dropped_links、unprocessable_tables | 答案裡的 HTML 轉換時拿掉了連結或表格才會出現 |
+
+> 建議每次都把 `row_changes` 記下來，和你那一側當天的異動比對；數字不對時先不要再傳，把回應與關聯編號提供給我們。
+
+#### 回應錯誤處理
+整份檔沒有任何變動。`detail` 多半是 `{"code": …, "detail": …}`，少數讀檔錯誤只有一句文字，請兩種都處理（`sample.py` 的 `print_error` 已處理）。
+
+| HTTP | Code | Message | 說明 |
+| --- | --- | --- | --- |
+| 400 | not_a_qa_set | 此資料集不是 QA 集：畫面請用一般 Excel 匯入，資料 API 請用 /api/v1/datasets/{id}/files | 一般資料集請用 1-7 |
+| 400 | only_xlsx | 僅支援 .xlsx 檔案 | |
+| 400 | qa_columns_required | 問題欄與答案欄皆為必填 | |
+| 400 | unknown_column | | 檔案裡找不到指定的欄名 |
+| 400 | qa_question_required | 問題欄「問題」有 2 列是空的，請補齊後再匯入 | `rows` 列出是哪幾列（從表頭下一列起算；資料中間沒有整列空白時，就是 Excel 左邊的列號） |
+| 400 | qa_answer_required | 答案欄「答案」有 1 列是空的，請補齊後再匯入 | 同上 |
+| 400 | qa_row_key_incomplete | 編號欄 id_col 與存放槽 row_key 要一起指定，或兩個都不帶 | |
+| 400 | bad_row_key | row_key「title」不能當列身分欄；可以用的欄位槽：…／編號欄 id_col「問題」不能和問題欄或答案欄同一欄 | |
+| 400 | qa_row_key_needs_external_key | 有編號欄時必須帶 external_key… | 沒有固定名字就沒辦法和上一版比對 |
+| 400 | row_key_invalid | 列身分欄「note3」每一列都要有值且不可重複：… | 編號有空白或重複，訊息列出是哪幾列 |
+| 400 | row_key_slot_in_use | 欄位槽「note3」已被這個租戶的標籤維度或時效設定使用… | 請改用其他欄位當 `row_key` |
+| 400 | content_empty_after_conversion | | 答案經 HTML 轉換後一個字都不剩，請改成文字或帶 `convert_html=false` |
+| 400 | （無） | Excel 格式不符：至少需要一筆資料列／找不到工作表… | 檔案沒有資料、工作表名稱錯誤或檔案損毀 |
+| 404 | | 找不到這個資料集 | |
+| 409 | qa_mass_removal | 這次上傳會刪掉 3 題：上一版 6 題、這次 3 題，刪除 50%，超過 20% 的防呆門檻，整批未處理。確認無誤請帶 allow_mass_removal=true 重送 | 見[大量刪除防呆](#大量刪除防呆) |
+| 409 | import_busy | 這個檔案正在被資料健檢或另一筆上傳處理，請稍後再傳一次 | 稍等幾秒再傳 |
+| 413 | upload_too_large／storage_exceeded | | 檔案超過 50 MB，或帳號儲存空間不足 |
+| 500 | internal_failure | 處理失敗。請提供關聯編號 … | 請提供關聯編號給我們 |
+| 502 | （無） | …失敗…。請提供關聯編號 … | 背景系統暫時失敗，資料沒有變動，可以重試 |
+
+---
+
 ### 資料處理狀態
 上傳 API 回應時，資料已經存進系統並開始建立索引，但**建立索引是在背景進行的**，回應回來時多半還沒完成，資料可能要再等一下才能被問答查到。`sync_state` 告訴你送出當下的狀況：
 
@@ -578,7 +719,7 @@ curl -X DELETE "https://<your-host>/api/v1/datasets/12/records/101" -H "X-API-Ke
 | 400 | row_key_requires_mapping | row_key 只對帶 mapping 的 xlsx 有效… | 帶了 `row_key` 卻沒帶 `mapping` |
 | 400 | too_many_import_files | 這次上傳的檔案有 201 筆，超過上限 200… | 一次超過 200 個檔案 |
 | 404 | | 找不到這個資料集 | `dataset_id` 錯誤 |
-| 409 | use_qa_import | 這是 QA 集，請用 QA 匯入… | 目標是 QA 集，不能用這組 API 上傳 |
+| 409 | use_qa_import | 這是 QA 集，請用 QA 匯入：畫面請用「匯入問答」，資料 API 請用 /api/v1/datasets/{id}/qa/import… | 目標是 QA 集，請改用 [1-10](#1-10-上傳-qa-集) |
 | 413 | upload_too_large | 檔案「x.pdf」超過上限 50 MB | 單檔超過 50 MB，或合計超過 200 MB。**排在前面、已經處理完的檔案仍會存進去** |
 
 #### 單筆失敗（寫在 results 裡，HTTP 仍是 200）
